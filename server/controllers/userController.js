@@ -11,11 +11,45 @@ import { clerkClient } from "@clerk/express";
 export const getUserData = async (req, res) => {
     try {
         const { userId } = req.auth()
-        const user = await User.findById(userId)
+        let user = await User.findById(userId) // Changed to 'let'
+
         if(!user){
-            return res.json({success: false, message: "User not found"})
+            // 💡 TEMPORARY FALLBACK FIX: User not found in MongoDB. Create the user now.
+            console.log(`User ${userId} not found in DB. Attempting to sync from Clerk...`);
+            
+            const clerkUser = await clerkClient.users.getUser(userId);
+
+            if (clerkUser) {
+                // Logic adapted from server/inngest/index.js syncUserCreation for direct creation
+                let username = clerkUser.emailAddresses[0].emailAddress.split('@')[0];
+                let existingUser = await User.findOne({username});
+
+                if (existingUser) {
+                    // Append random number if username already exists
+                    username = username + Math.floor(Math.random() * 10000);
+                }
+
+                const userData = {
+                    _id: userId,
+                    email: clerkUser.emailAddresses[0].emailAddress,
+                    // Handle potential null/undefined names
+                    full_name: `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim() || 'New User',
+                    profile_picture: clerkUser.imageUrl,
+                    username
+                };
+                
+                // Create the new user document
+                user = await User.create(userData);
+                console.log(`Fallback: Created missing user record for userId: ${userId}`);
+            } else {
+                // Should only happen if the Clerk session is invalid
+                return res.json({success: false, message: "User not found in Clerk or DB."})
+            }
         }
+        
+        // Return the user (either fetched or newly created)
         res.json({success: true, user})
+
     } catch (error) {
         console.log(error);
         res.json({success: false, message: error.message})
@@ -224,7 +258,9 @@ export const getUserConnections = async (req, res) => {
     try {
         const {userId} = req.auth()
         const user = await User.findById(userId).populate('connections followers following')
-
+        if (!user) {
+            return res.status(404).json({ success: false, message: "User not found." });
+        }
         const connections = user.connections
         const followers = user.followers
         const following = user.following
